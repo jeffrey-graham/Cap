@@ -1,0 +1,23 @@
+name: probe-win-installer
+
+on:
+  push:
+    branches: [probe/win-locks-installer]
+
+jobs:
+  probe:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe
+        shell: pwsh
+        env:
+          RELEASE_URL: https://cdn.crabnebula.app/asset/01M626H7JHNEMYF6WTY3F0YB59
+        run: ./probe-win-installer.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: probe-win-installer
+          path: ${{ runner.temp }}/instprobe-out
+          retention-days: 3
