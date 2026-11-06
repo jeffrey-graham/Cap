@@ -1,0 +1,143 @@
+name: Probe contributor PRs
+
+on:
+  push:
+    branches: [probe/contrib-prs-1106]
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: main
+            ref: da2c85eed47ddcbda6c4beb5efac1891140abc50
+          - label: pr3664
+            ref: refs/pull/3664/head
+          - label: pr3761
+            ref: refs/pull/3761/head
+    runs-on: windows-2022
+    timeout-minutes: 90
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+      - uses: actions/checkout@v4
+        with:
+          ref: probe/contrib-prs-1106
+          path: probe-src
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: ./.github/actions/setup-rust-cache
+        with:
+          target: x86_64-pc-windows-msvc
+          prefix-key: v1-rust-gpui
+          save-cache: "false"
+          workspaces: apps/desktop-gpui -> target
+      - name: Setup
+        shell: bash
+        run: |
+          git log -1 --format='%H %s'
+          node scripts/setup.js
+          node scripts/sync-desktop-versions.mjs
+          ./scripts/prepare-gpui-dependency.sh
+        env:
+          RUST_TARGET_TRIPLE: x86_64-pc-windows-msvc
+      - name: Probe-only capture switch (inert unless CAP_PROBE_CAPTURE_VISIBLE is set)
+        shell: bash
+        run: |
+          python - <<'PY'
+          p = "apps/desktop-gpui/src/platform/windows.rs"
+          s = open(p, encoding="utf-8").read()
+          needle = "pub fn set_window_capture_hidden(native: &NativeWindow, hidden: bool) -> usize {\n"
+          assert needle in s
+          s = s.replace(needle, needle + "    let hidden = hidden && std::env::var_os(\"CAP_PROBE_CAPTURE_VISIBLE\").is_none();\n", 1)
+          open(p, "w", encoding="utf-8").write(s)
+          PY
+          git diff --stat
+      - name: Build
+        shell: bash
+        run: cargo +1.95.0 build --manifest-path apps/desktop-gpui/Cargo.toml --locked --target x86_64-pc-windows-msvc --bin cap-gpui
+      - name: Probe
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:GITHUB_WORKSPACE\target\debug;$env:PATH"
+          Start-Process notepad.exe
+          Start-Sleep 2
+          & probe-src/probe/windows.ps1 -App "$env:GITHUB_WORKSPACE\apps\desktop-gpui\target\x86_64-pc-windows-msvc\debug\cap-gpui.exe" -Out "$env:RUNNER_TEMP\probe"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: probe-windows-${{ matrix.label }}
+          path: ${{ runner.temp }}/probe
+          retention-days: 7
+
+  linux:
+    name: Linux ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: main
+            ref: da2c85eed47ddcbda6c4beb5efac1891140abc50
+          - label: pr3534
+            ref: refs/pull/3534/head
+          - label: pr3896
+            ref: refs/pull/3896/head
+          - label: pr3898
+            ref: refs/pull/3898/head
+          - label: pr3780
+            ref: refs/pull/3780/head
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 90
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+      - uses: actions/checkout@v4
+        with:
+          ref: probe/contrib-prs-1106
+          path: probe-src
+      - uses: ./.github/actions/install-desktop-deps
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: ./.github/actions/setup-rust-cache
+        with:
+          target: x86_64-unknown-linux-gnu
+          prefix-key: v1-rust-gpui
+          save-cache: "false"
+          workspaces: apps/desktop-gpui -> target
+      - name: Setup
+        run: |
+          git log -1 --format='%H %s'
+          node scripts/setup.js
+          node scripts/sync-desktop-versions.mjs
+          ./scripts/prepare-gpui-dependency.sh
+        env:
+          RUST_TARGET_TRIPLE: x86_64-unknown-linux-gnu
+      - name: Build
+        run: >-
+          cargo +1.95.0 build --manifest-path apps/desktop-gpui/Cargo.toml --locked --bin cap-gpui
+          --config 'profile.dev.package.wgpu-types.debug-assertions=false'
+      - name: Probe
+        run: |
+          sudo apt-get install -y -qq xvfb x11-utils xdotool ffmpeg dbus pipewire pipewire-pulse wireplumber pulseaudio-utils libasound2-plugins >/dev/null
+          pipewire --version || true
+          bash probe-src/probe/linux.sh "$GITHUB_WORKSPACE/apps/desktop-gpui/target/debug/cap-gpui" \
+            "$GITHUB_WORKSPACE/target/native-deps/lib" "$RUNNER_TEMP/probe"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: probe-linux-${{ matrix.label }}
+          path: ${{ runner.temp }}/probe
+          retention-days: 7
