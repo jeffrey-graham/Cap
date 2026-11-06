@@ -6618,7 +6618,13 @@ pub(crate) fn request_editor_deletion(
             platform::alert_dialog(tr::dialog::delete_recording::retained_title(), &error);
             return;
         }
-        if !platform::confirm_dialog("Cap", tr::main::delete_recording_confirm(), tr::common::yes(), tr::common::no(), false) {
+        if !platform::confirm_dialog(
+            "Cap",
+            tr::main::delete_recording_confirm(),
+            tr::common::yes(),
+            tr::common::no(),
+            false,
+        ) {
             return;
         }
         let prepared = cx.update(|cx| {
@@ -6658,34 +6664,36 @@ pub(crate) fn request_editor_deletion(
             }
         };
         let deleting = key.clone();
-        let task = cx.update(|cx| gpui_tokio::Tokio::spawn(cx, async move {
-            delete_after_editor_cleanup(
-                async move {
-                    if let Some(instance) = instance {
-                        for segment in instance.segment_medias.iter() {
-                            for audio in [&segment.audio, &segment.system_audio] {
-                                if let Err(error) = audio.get().await {
-                                    tracing::debug!(%error, "audio reader settled with an error before deletion");
-                                }
-                            }
+        let task = cx.update(|cx| {
+            gpui_tokio::Tokio::spawn(cx, async move {
+                delete_after_editor_cleanup(
+                    async move {
+                        if let Some(instance) = instance {
+                            release_editor_instance(instance).await;
                         }
-                        instance.dispose().await;
-                    }
-                    drop(ownership);
-                    Ok(())
-                },
-                crate::upload::queue::delete_recording(deleting),
-            ).await
-        }));
-        let notice = cx.background_executor().timer(std::time::Duration::from_secs(10));
+                        drop(ownership);
+                        Ok(())
+                    },
+                    crate::upload::queue::delete_recording(deleting),
+                )
+                .await
+            })
+        });
+        let notice = cx
+            .background_executor()
+            .timer(std::time::Duration::from_secs(10));
         futures_util::pin_mut!(task, notice);
         let result = match futures_util::future::select(&mut task, &mut notice).await {
             futures_util::future::Either::Left((result, _)) => result,
             futures_util::future::Either::Right(_) => {
-                platform::alert_dialog(tr::dialog::delete_recording::finishing_title(), tr::dialog::delete_recording::finishing_body());
+                platform::alert_dialog(
+                    tr::dialog::delete_recording::finishing_title(),
+                    tr::dialog::delete_recording::finishing_body(),
+                );
                 task.await
             }
-        }.unwrap_or_else(|error| Err(tr::dialog::delete_recording::failed(error)));
+        }
+        .unwrap_or_else(|error| Err(tr::dialog::delete_recording::failed(error)));
         cx.update(|cx| {
             cx.global_mut::<AppWindows>().deleting_editors.remove(&key);
             refresh_library_after_delete(cx);
@@ -6694,7 +6702,8 @@ pub(crate) fn request_editor_deletion(
             tracing::error!(path = %key.display(), %error, "recording deletion failed");
             platform::alert_dialog(tr::dialog::delete_recording::failed_title(), &error);
         }
-    }).detach();
+    })
+    .detach();
 }
 
 async fn delete_after_editor_cleanup(
@@ -6703,6 +6712,42 @@ async fn delete_after_editor_cleanup(
 ) -> Result<(), String> {
     cleanup.await?;
     delete.await
+}
+
+/// How long deleting from the editor waits for the editor's own tasks to let
+/// go of its engine before it tries the delete anyway.
+const EDITOR_RELEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Stops the editor engine and waits until nothing holds it. The transport
+/// driver, the engine-stop drain and the waveform loader each own a clone and
+/// drop it only after they notice the window is gone, and playback tasks own
+/// the segment media. The decoders inside keep the clip's media files open
+/// until the last clone is dropped, and Windows refuses to delete an open
+/// file, so deleting straight after `dispose` failed with a sharing violation.
+async fn release_editor_instance(instance: Arc<cap_editor::EditorInstance>) {
+    for segment in instance.segment_medias.iter() {
+        for audio in [&segment.audio, &segment.system_audio] {
+            if let Err(error) = audio.get().await {
+                tracing::debug!(%error, "audio reader settled with an error before deletion");
+            }
+        }
+    }
+    instance.dispose().await;
+    let engine = Arc::downgrade(&instance);
+    let media = Arc::downgrade(&instance.segment_medias);
+    drop(instance);
+    let deadline = tokio::time::Instant::now() + EDITOR_RELEASE_TIMEOUT;
+    while engine.strong_count() > 0 || media.strong_count() > 0 {
+        if tokio::time::Instant::now() >= deadline {
+            tracing::warn!(
+                engine = engine.strong_count(),
+                media = media.strong_count(),
+                "the editor engine is still held; deleting anyway"
+            );
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
 
 /// `addExistingRecordingToEditor` ends with `EditorInstances::remove(window)`
@@ -7680,6 +7725,174 @@ mod tests {
         complete.send(()).unwrap();
         deletion.await.unwrap();
         assert!(!source.exists());
+    }
+
+    /// Opens a real project in the editor engine the way an editor window does
+    /// (instance, transport driver, first preview frame), then deletes it the
+    /// way the editor's delete button does once its window is gone. Windows
+    /// refuses to delete a file a decoder still has open.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn deleting_from_the_editor_releases_the_recordings_media() {
+        let root = tempfile::tempdir().unwrap();
+        let library = root.path().join("recordings");
+        std::fs::create_dir(&library).unwrap();
+        let bundle = library.join("delete.cap");
+        let spec = cap_verify::catalog::basic(cap_verify::report::Tier::Fast);
+        cap_verify::fixture::write_fixture(&spec, &bundle).unwrap();
+
+        let (frames, frame_rx) = flume::bounded(4);
+        let (audio, _sink) = cap_editor::AudioOutput::new_offline();
+        let instance = cap_editor::EditorInstance::new_with_audio_output(
+            bundle.clone(),
+            |_| {},
+            Box::new(move |output, _| {
+                let _ = frames.try_send(output);
+            }),
+            None,
+            Arc::new(audio),
+        )
+        .await
+        .unwrap();
+        let (transport, driver, _engine_stopped) = editor_window::transport();
+        tokio::spawn(editor_window::run_transport(instance.clone(), driver));
+        instance
+            .preview_tx
+            .send(Some((0, 30, cap_project::XY::new(320, 180))))
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(30), frame_rx.recv_async())
+            .await
+            .expect("the editor rendered no preview frame")
+            .unwrap();
+
+        // Removing the window drops its transport handle; the driver lets go
+        // of the engine on its own schedule, exactly as in the app.
+        drop(transport);
+        let result = delete_after_editor_cleanup(
+            async {
+                release_editor_instance(instance).await;
+                Ok(())
+            },
+            async { crate::library::delete_recording_directory_in(&[library.clone()], &bundle) },
+        )
+        .await;
+        assert_eq!(result, Ok(()));
+        assert!(!bundle.exists());
+    }
+
+
+    async fn probe_open_editor(
+        tag: &str,
+    ) -> (
+        tempfile::TempDir,
+        PathBuf,
+        PathBuf,
+        Arc<cap_editor::EditorInstance>,
+        editor_window::TransportHandle,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let library = root.path().join("recordings");
+        std::fs::create_dir(&library).unwrap();
+        let bundle = library.join(format!("{tag}.cap"));
+        let spec = cap_verify::catalog::basic(cap_verify::report::Tier::Fast);
+        cap_verify::fixture::write_fixture(&spec, &bundle).unwrap();
+        let (frames, frame_rx) = flume::bounded(4);
+        let (audio, _sink) = cap_editor::AudioOutput::new_offline();
+        let instance = cap_editor::EditorInstance::new_with_audio_output(
+            bundle.clone(),
+            |_| {},
+            Box::new(move |output, _| {
+                let _ = frames.try_send(output);
+            }),
+            None,
+            Arc::new(audio),
+        )
+        .await
+        .unwrap();
+        let (transport, driver, _engine_stopped) = editor_window::transport();
+        tokio::spawn(editor_window::run_transport(instance.clone(), driver));
+        instance
+            .preview_tx
+            .send(Some((0, 30, cap_project::XY::new(320, 180))))
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(30), frame_rx.recv_async())
+            .await
+            .expect("no preview frame")
+            .unwrap();
+        (root, library, bundle, instance, transport)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn deleting_from_the_editor_probe_variants() {
+        for round in 0..5 {
+            // main: audio settle + dispose + drop, then the plain remove_dir_all main ships.
+            let (_root, _library, bundle, instance, transport) =
+                probe_open_editor(&format!("main{round}")).await;
+            drop(transport);
+            for segment in instance.segment_medias.iter() {
+                for audio in [&segment.audio, &segment.system_audio] {
+                    let _ = audio.get().await;
+                }
+            }
+            instance.dispose().await;
+            drop(instance);
+            let started = std::time::Instant::now();
+            let result = std::fs::remove_dir_all(&bundle);
+            println!(
+                "PROBE main round={round} result={result:?} exists_after={}",
+                bundle.exists()
+            );
+            let _ = started;
+            for _ in 0..100 {
+                if std::fs::remove_dir_all(&bundle).is_ok() || !bundle.exists() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            println!(
+                "PROBE main round={round} released_after_ms={}",
+                started.elapsed().as_millis()
+            );
+
+            // the engine wait alone, with a plain remove_dir_all
+            let (_root, _library, bundle, instance, transport) =
+                probe_open_editor(&format!("wait{round}")).await;
+            drop(transport);
+            let waited = std::time::Instant::now();
+            release_editor_instance(instance).await;
+            let waited_ms = waited.elapsed().as_millis();
+            let result = std::fs::remove_dir_all(&bundle);
+            println!("PROBE wait-only round={round} wait_ms={waited_ms} result={result:?}");
+            let started = std::time::Instant::now();
+            for _ in 0..100 {
+                if std::fs::remove_dir_all(&bundle).is_ok() || !bundle.exists() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            println!(
+                "PROBE wait-only round={round} gone_after_extra_ms={}",
+                started.elapsed().as_millis()
+            );
+
+            // the full fix
+            let (_root, library, bundle, instance, transport) =
+                probe_open_editor(&format!("fix{round}")).await;
+            drop(transport);
+            let started = std::time::Instant::now();
+            let result = delete_after_editor_cleanup(
+                async {
+                    release_editor_instance(instance).await;
+                    Ok(())
+                },
+                async { crate::library::delete_recording_directory_in(&[library.clone()], &bundle) },
+            )
+            .await;
+            println!(
+                "PROBE fix round={round} result={result:?} total_ms={} exists_after={}",
+                started.elapsed().as_millis(),
+                bundle.exists()
+            );
+        }
     }
 
     #[tokio::test]
