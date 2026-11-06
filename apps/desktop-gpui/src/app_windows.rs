@@ -7747,7 +7747,7 @@ mod tests {
             Box::new(move |output, _| {
                 let _ = frames.try_send(output);
             }),
-            None,
+            shared_wgpu_device().await,
             Arc::new(cap_editor::AudioOutput::new_headless(Box::new(|_, _| {}))),
         )
         .await
@@ -7801,7 +7801,7 @@ mod tests {
             Box::new(move |output, _| {
                 let _ = frames.try_send(output);
             }),
-            None,
+            shared_wgpu_device().await,
             Arc::new(cap_editor::AudioOutput::new_headless(Box::new(|_, _| {}))),
         )
         .await
