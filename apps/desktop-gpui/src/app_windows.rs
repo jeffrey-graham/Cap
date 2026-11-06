@@ -7741,7 +7741,6 @@ mod tests {
         cap_verify::fixture::write_fixture(&spec, &bundle).unwrap();
 
         let (frames, frame_rx) = flume::bounded(4);
-        let (audio, _sink) = cap_editor::AudioOutput::new_offline();
         let instance = cap_editor::EditorInstance::new_with_audio_output(
             bundle.clone(),
             |_| {},
@@ -7749,7 +7748,7 @@ mod tests {
                 let _ = frames.try_send(output);
             }),
             None,
-            Arc::new(audio),
+            Arc::new(cap_editor::AudioOutput::new_headless(Box::new(|_, _| {}))),
         )
         .await
         .unwrap();
@@ -7796,7 +7795,6 @@ mod tests {
         let spec = cap_verify::catalog::basic(cap_verify::report::Tier::Fast);
         cap_verify::fixture::write_fixture(&spec, &bundle).unwrap();
         let (frames, frame_rx) = flume::bounded(4);
-        let (audio, _sink) = cap_editor::AudioOutput::new_offline();
         let instance = cap_editor::EditorInstance::new_with_audio_output(
             bundle.clone(),
             |_| {},
@@ -7804,7 +7802,7 @@ mod tests {
                 let _ = frames.try_send(output);
             }),
             None,
-            Arc::new(audio),
+            Arc::new(cap_editor::AudioOutput::new_headless(Box::new(|_, _| {}))),
         )
         .await
         .unwrap();
