@@ -78,11 +78,16 @@ function Launch($name, $vars) {
   $env:CAP_GPUI_AUTO_NO_MIC = "1"
   $env:RUST_LOG = "cap_gpui=info,cap_recording=info"
   foreach ($k in $vars.Keys) { Set-Item -Path "env:$k" -Value $vars[$k] }
-  $p = Start-Process -FilePath $App -PassThru -RedirectStandardOutput (Join-Path $profile "cap.log") -RedirectStandardError (Join-Path $profile "cap.err.log")
+  $p = Start-Process -FilePath $App -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $profile "cap.log") -RedirectStandardError (Join-Path $profile "cap.err.log")
   foreach ($k in $vars.Keys) { Remove-Item -Path "env:$k" -ErrorAction SilentlyContinue }
-  return $p
+  $pidFile = Join-Path $profile "cap-gpui.pid"
+  for ($i = 0; $i -lt 100 -and -not (Test-Path $pidFile); $i++) { Start-Sleep -Milliseconds 100 }
+  $real = $p.Id
+  if (Test-Path $pidFile) { $real = [int](Get-Content $pidFile -Raw).Trim() }
+  "launch $name start-process-id=$($p.Id) pid-file=$real" | Add-Content (Join-Path $Out "windows.log")
+  return [pscustomobject]@{ Id = $real }
 }
-function Stop($p) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; Start-Sleep 2 }
+function Stop($p) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; Get-Process cap-gpui -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep 2 }
 function LogAfter($log, $first, $then) {
   $lines = Get-Content $log -ErrorAction SilentlyContinue
   $seen = $false
@@ -118,14 +123,17 @@ Stop $p
 
 # 2. Close the main window, start a Studio recording with the shortcut, stop it,
 # let the editor open and close it: the main window should stay closed.
-$p = Launch "editor" @{ CAP_GPUI_AUTO_HOTKEY = "startStudioRecording"; CAP_GPUI_AUTO_TRAY = "stop"; CAP_GPUI_AUTO_TRAY_DELAY = "14000"; CAP_GPUI_AUTO_EDITOR_CLOSE = "5" }
+$p = Launch "editor" @{ CAP_GPUI_AUTO_HOTKEY = "startStudioRecording"; CAP_GPUI_AUTO_TRAY = "stop"; CAP_GPUI_AUTO_TRAY_DELAY = "14000" }
 $log = Join-Path $Out "editor\cap.log"
 for ($i = 0; $i -lt 300 -and (Visible $p "Cap") -ne "yes"; $i++) { Start-Sleep -Milliseconds 100 }
 Result editor_main_shown_at_launch (Visible $p "Cap")
 [W]::PostMessage((Find $p "Cap"), 0x10, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
 Result editor_recording_started (WaitLog $log "recording started" 40)
 Result editor_opened (WaitLog $log "editor instance ready|preparing editor shell created" 60)
-Result editor_closed_logged (WaitLog $log "editor window closed" 40)
+Start-Sleep 3
+Dump $p "editor: editor open"
+foreach ($hw in [W]::Of([uint32]$p.Id)) { $t = [W]::Title($hw); if ([W]::IsWindowVisible($hw) -and $t -ne "Cap" -and $t -ne "") { "closing editor window '$t'" | Add-Content (Join-Path $Out "windows.log"); [W]::PostMessage($hw, 0x10, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null } }
+Result editor_closed_logged (WaitLog $log "editor window closed" 20)
 Start-Sleep 4
 Dump $p "editor: after closing the editor"
 Result editor_main_visible_after_editor_close (Visible $p "Cap")
