@@ -35,4 +35,4 @@ jobs:
         shell: bash
         run: |
           export PATH="$(cygpath "$GITHUB_WORKSPACE/target/debug"):$PATH"
-          cargo +1.95.0 test --manifest-path apps/desktop-gpui/Cargo.toml --locked --target x86_64-pc-windows-msvc --bin cap-gpui deleting_from_the_editor -- --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/probe.log" | grep -E "PROBE|test .*\.\.\.|panicked|error\[|test result"
+          cargo +1.95.0 test --manifest-path apps/desktop-gpui/Cargo.toml --locked --target x86_64-pc-windows-msvc --bin cap-gpui deleting_from_the_editor -- --nocapture --test-threads=1 2>&1 | grep -vE "^\s*(Compiling|Downloaded|Checking|Fresh)"
