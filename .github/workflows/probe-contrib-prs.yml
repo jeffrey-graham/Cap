@@ -18,8 +18,6 @@ jobs:
             ref: da2c85eed47ddcbda6c4beb5efac1891140abc50
           - label: pr3664
             ref: refs/pull/3664/head
-          - label: pr3761
-            ref: refs/pull/3761/head
     runs-on: windows-2022
     timeout-minutes: 90
     env:
@@ -75,7 +73,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: probe-windows-${{ matrix.label }}-r2
+          name: probe-windows-${{ matrix.label }}-r3
           path: ${{ runner.temp }}/probe
           retention-days: 7
 

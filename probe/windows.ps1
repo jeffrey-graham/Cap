@@ -7,7 +7,7 @@ $results = Join-Path $Out "result.txt"
 Set-Content -Path $results -Value ""
 function Result($k, $v) { "$k=$v" | Tee-Object -FilePath $results -Append }
 
-Add-Type -ReferencedAssemblies System.Drawing @"
+Add-Type -ErrorAction Stop @"
 using System; using System.Text; using System.Collections.Generic; using System.Runtime.InteropServices;
 public static class W {
   public delegate bool EnumProc(IntPtr h, IntPtr l);
