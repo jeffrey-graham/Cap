@@ -6,8 +6,8 @@ on:
 
 jobs:
   probe:
-    runs-on: blacksmith-8vcpu-windows-2025
-    timeout-minutes: 120
+    runs-on: windows-2022
+    timeout-minutes: 180
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
     steps:

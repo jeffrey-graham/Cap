@@ -7741,7 +7741,7 @@ mod tests {
         cap_verify::fixture::write_fixture(&spec, &bundle).unwrap();
 
         let (frames, frame_rx) = flume::bounded(4);
-        let instance = cap_editor::EditorInstance::new_with_audio_output(
+        let instance = match cap_editor::EditorInstance::new_with_audio_output(
             bundle.clone(),
             |_| {},
             Box::new(move |output, _| {
@@ -7751,7 +7751,14 @@ mod tests {
             Arc::new(cap_editor::AudioOutput::new_headless(Box::new(|_, _| {}))),
         )
         .await
-        .unwrap();
+        {
+            Ok(instance) => instance,
+            Err(error) if error.contains("No GPU adapter found") => {
+                eprintln!("skipping: the editor needs a GPU adapter ({error})");
+                return;
+            }
+            Err(error) => panic!("the editor failed to open the project: {error}"),
+        };
         let (transport, driver, _engine_stopped) = editor_window::transport();
         tokio::spawn(editor_window::run_transport(instance.clone(), driver));
         instance
